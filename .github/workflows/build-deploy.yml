@@ -1,0 +1,71 @@
+name: Build and Deploy
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main, develop]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        node-version: [18.x]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Use Node.js ${{ matrix.node-version }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node-version }}
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Lint code
+        run: npm run lint
+
+      - name: Build Customer App
+        run: npm run build:customer
+
+      - name: Build Admin Dashboard
+        run: npm run build:admin
+
+      - name: Build Product Catalog
+        run: npm run build:catalog
+
+      - name: Store build artifacts
+        uses: actions/upload-artifact@v4
+        if: success()
+        with:
+          name: build-artifacts
+          path: |
+            apps/customer-app/dist
+            apps/admin-dashboard/dist
+            apps/product-catalog/dist
+          retention-days: 30
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: build-artifacts
+
+      - name: Deploy Customer App
+        run: echo "Deploying customer-app to production..."
+
+      - name: Deploy Admin Dashboard
+        run: echo "Deploying admin-dashboard to production..."
+
+      - name: Deploy Product Catalog
+        run: echo "Deploying product-catalog to production..."
