@@ -1,7 +1,8 @@
 {
   "$schema": "./node_modules/nx/schemas/nx-schema.json",
-  "defaultBase": "master",
+  "defaultBase": "main",
   "analytics": false,
+  "useDaemonProcess": false,
   "namedInputs": {
     "default": ["{projectRoot}/**/*", "sharedGlobals"],
     "production": [
@@ -18,20 +19,6 @@
     "sharedGlobals": []
   },
   "plugins": [
-    {
-      "plugin": "@nx/js/typescript",
-      "options": {
-        "typecheck": {
-          "targetName": "typecheck"
-        },
-        "build": {
-          "targetName": "build",
-          "configName": "tsconfig.lib.json",
-          "buildDepsName": "build-deps",
-          "watchDepsName": "watch-deps"
-        }
-      }
-    },
     {
       "plugin": "@nx/react/router-plugin",
       "options": {
@@ -61,23 +48,6 @@
         "typecheckTargetName": "typecheck",
         "buildDepsTargetName": "build-deps",
         "watchDepsTargetName": "watch-deps"
-      }
-    },
-    {
-      "plugin": "@nx/vitest",
-      "options": {
-        "testTargetName": "test",
-        "ciTargetName": "test-ci",
-        "testMode": "watch"
-      }
-    },
-    {
-      "plugin": "@nx/cypress/plugin",
-      "options": {
-        "targetName": "e2e",
-        "openTargetName": "open-cypress",
-        "componentTestingTargetName": "component-test",
-        "ciTargetName": "e2e-ci"
       }
     }
   ],
