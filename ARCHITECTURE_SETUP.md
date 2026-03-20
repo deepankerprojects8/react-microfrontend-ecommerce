@@ -44,15 +44,17 @@ Monorepo Root (react-microfrontend-workspace)
 | Build Tool | Vite | ^7.0.0 | Fast HMR dev server and production bundling |
 | Styling | Tailwind CSS | 3.4.3 | Utility-first CSS |
 | State Management | Context API + Hooks | — | Cart and product state shared via shared lib |
-| Monorepo Tooling | Nx | Latest | Task orchestration, dependency graph, caching |
+| Monorepo Tooling | Nx | 22.6.1 | Task orchestration, affected detection, caching, dependency graph |
 | Package Manager | npm Workspaces | — | Single `node_modules`, workspace-aware installs |
 | Test Runner | Jest + ts-jest | ^30.x | Unit and component testing |
 | Test DOM | jest-environment-jsdom | ^30.x | DOM simulation for React component tests |
 | Test Utilities | @testing-library/react | ^16.x | React component testing helpers |
-| Linter | ESLint + @nx/eslint-plugin | ^9.x | Code quality enforcement |
+| Linter | ESLint + @nx/eslint-plugin | ^9.x | Code quality enforcement with module boundary rules |
 | Formatter | Prettier | ~3.6.2 | Consistent code style |
 | Git Hooks | Husky + lint-staged | ^9.x / ^16.x | Pre-commit quality gates |
 | Commit Linting | @commitlint/cli | ^20.x | Enforce conventional commit messages |
+| CI/CD | GitHub Actions | — | Automated PR checks, affected builds, independent deployments |
+| Runtime | Node.js | 24.x (CI) | JavaScript runtime for build toolchain |
 
 ---
 
@@ -63,8 +65,8 @@ react-microfrontend-workspace/
 │
 ├── .github/
 │   └── workflows/
-│       ├── build-deploy.yml          # CI/CD: build + deploy on push to main
-│       └── pr-checks.yml             # CI/CD: typecheck + lint + test on PRs
+│       ├── pr-checks.yml             # CI/CD: lint + typecheck + test on affected projects (PRs)
+│       └── build-deploy.yml          # CI/CD: affected-based build + independent deploy per app (push to main)
 │
 ├── .husky/
 │   ├── pre-commit                    # Runs lint-staged before every commit
@@ -89,6 +91,7 @@ react-microfrontend-workspace/
 │       │       ├── CartSummary.tsx   # Order summary with totals
 │       │       └── index.ts
 │       ├── package.json              # Package name: @react-microfrontend-workspace/shared
+│       ├── project.json              # Nx project config: scoped Jest test target for this lib
 │       ├── tsconfig.json             # TypeScript config for the library
 │       └── tsconfig.app.json         # Build-time TypeScript config
 │
@@ -112,6 +115,7 @@ react-microfrontend-workspace/
 │   │   ├── tsconfig.app.json
 │   │   ├── tailwind.config.js
 │   │   ├── postcss.config.js
+│   │   ├── project.json              # Nx project config: scoped Jest test target for this app
 │   │   └── package.json
 │   │
 │   ├── admin-dashboard/              # Microfrontend: Admin Panel (Port 4201)
@@ -127,6 +131,7 @@ react-microfrontend-workspace/
 │   │   ├── tsconfig.app.json
 │   │   ├── tailwind.config.js
 │   │   ├── postcss.config.js
+│   │   ├── project.json              # Nx project config: scoped Jest test target for this app
 │   │   └── package.json
 │   │
 │   └── product-catalog/              # Microfrontend: Product Catalog (Port 4202)
@@ -142,13 +147,14 @@ react-microfrontend-workspace/
 │       ├── tsconfig.app.json
 │       ├── tailwind.config.js
 │       ├── postcss.config.js
+│       ├── project.json              # Nx project config: scoped Jest test target for this app
 │       └── package.json
 │
 ├── package.json                      # Root: workspace config, shared devDependencies, scripts
 ├── tsconfig.base.json                # Base TypeScript config inherited by all packages
 ├── tsconfig.json                     # Root TypeScript project references
-├── nx.json                           # Nx workspace configuration
-├── eslint.config.mjs                 # Root ESLint flat config
+├── nx.json                           # Nx workspace configuration (plugins, caching, targetDefaults)
+├── eslint.config.mjs                 # Root ESLint flat config (@nx/eslint-plugin)
 ├── commitlint.config.js              # Conventional commit rules
 ├── jest.config.js                    # Root Jest config covering all packages
 ├── test-setup.ts                     # Jest global setup (imports @testing-library/jest-dom)
@@ -172,14 +178,40 @@ react-microfrontend-workspace/
   "name": "@react-microfrontend-workspace/source",
   "workspaces": ["libs/*", "apps/*"],   // Declares all workspace packages
   "scripts": {
-    "dev:customer": "npm run dev -w apps/customer-app",
-    "dev:admin":    "npm run dev -w apps/admin-dashboard",
-    "dev:catalog":  "npm run dev -w apps/product-catalog",
-    "build":        "npm run build:customer && npm run build:admin && npm run build:catalog",
-    "lint":         "eslint . --ext .ts,.tsx,.js,.jsx",
-    "test":         "jest",
-    "test:watch":   "jest --watch",
-    "test:coverage":"jest --coverage"
+    // --- Dev servers (per app) ---
+    "dev:customer":       "npm run dev -w apps/customer-app",
+    "dev:admin":          "npm run dev -w apps/admin-dashboard",
+    "dev:catalog":        "npm run dev -w apps/product-catalog",
+
+    // --- Build scripts ---
+    "build":              "nx run-many --target=build --all",       // All apps via Nx
+    "build:customer":     "npm run build -w apps/customer-app",
+    "build:admin":        "npm run build -w apps/admin-dashboard",
+    "build:catalog":      "npm run build -w apps/product-catalog",
+    "build:affected":     "nx affected --target=build",             // Only what changed
+
+    // --- Lint scripts ---
+    "lint":               "eslint . --ext .ts,.tsx,.js,.jsx",
+    "lint:customer":      "eslint apps/customer-app/src --ext .ts,.tsx",
+    "lint:admin":         "eslint apps/admin-dashboard/src --ext .ts,.tsx",
+    "lint:catalog":       "eslint apps/product-catalog/src --ext .ts,.tsx",
+    "lint:all":           "nx run-many --target=lint --all",
+    "lint:affected":      "nx affected --target=lint",
+
+    // --- Test scripts ---
+    "test":               "jest",
+    "test:watch":         "jest --watch",
+    "test:coverage":      "jest --coverage",
+    "test:customer":      "jest --testPathPattern=apps/customer-app",
+    "test:admin":         "jest --testPathPattern=apps/admin-dashboard",
+    "test:catalog":       "jest --testPathPattern=apps/product-catalog",
+    "test:affected":      "nx affected --target=test",
+
+    // --- TypeScript ---
+    "typecheck":          "tsc --noEmit",
+    "typecheck:affected": "nx affected --target=typecheck",
+
+    "graph":              "nx graph"                                 // Visual dep graph
   }
 }
 ```
@@ -242,16 +274,25 @@ The `-w` flag targets a specific workspace package. Dependencies like `typescrip
 
 **Key sections:**
 
-- **`plugins`** — Registers Nx plugins:
-  - `@nx/js/typescript` — Powers `typecheck` and `build` targets for TypeScript projects
-  - `@nx/vite/plugin` — Autodiscovers Vite `build`, `dev`, `preview` targets from `vite.config.ts`
-  - `@nx/eslint/plugin` — Autodiscovers `lint` target from `eslint.config.mjs`
+- **`useDaemonProcess: false`** — Disables the Nx background daemon. On Windows with workspace paths containing spaces, the daemon's Unix-socket IPC fails to connect. Running without the daemon is fully supported and has no impact on caching or correctness.
+
+- **`defaultBase: "main"`** — The base branch for `nx affected` comparisons. Ensures affected detection compares changes against `main`, the production branch.
+
+- **`plugins`** — Registers Nx inference plugins (only those that work cleanly on this workspace):
+  - `@nx/vite/plugin` — Autodiscovers `build`, `dev`, `serve`, `preview`, `typecheck` targets from each app's `vite.config.ts`
+  - `@nx/eslint/plugin` — Autodiscovers the `lint` target from `eslint.config.mjs`
   - `@nx/react/router-plugin` — React Router integration for apps
-  - `@nx/vitest` — Vitest test target discovery (retained in config but Jest is active test runner)
+  - **Removed:** `@nx/js/typescript` — Caused a persistent worker-process crash on Windows paths with spaces. TypeScript builds and typechecks still work via dedicated `tsconfig.*` files and `tsc --noEmit`.
 
-- **`namedInputs`** — Defines file glob patterns (`default`, `production`) used to fingerprint task inputs for caching. The `production` input excludes test files and spec configs so a test-only change does not invalidate the production build cache.
+- **`namedInputs`** — Defines file glob patterns used to fingerprint task inputs for caching:
+  - `default` — All files in a project
+  - `production` — Excludes test specs, `eslintrc`, and `tsconfig.spec.json` so test-only changes do not invalidate the production build cache
 
-- **`targetDefaults.test.dependsOn`** — Ensures `build` of dependencies runs before `test`.
+- **`targetDefaults`** — Declares caching behaviour and input fingerprints for each shared target:
+  - `build` — Cached; depends on `^build` (library must build before apps that consume it)
+  - `lint` — Cached; inputs include `eslint.config.mjs`
+  - `test` — Cached; inputs include `jest.config.js` and `test-setup.ts`
+  - `typecheck` — Cached
 
 ---
 
@@ -322,6 +363,34 @@ The `moduleNameMapper` is critical — it redirects the `@react-microfrontend-wo
 **What it does:** Imported before every test suite. Adds `@testing-library/jest-dom` custom matchers to Jest.
 
 **Why it exists:** Enables assertions like `expect(element).toBeInTheDocument()`, `toBeDisabled()`, `toHaveTextContent()`, etc., which are not part of Jest's built-in matchers.
+
+---
+
+### `project.json` (per app and per lib)
+
+**What it does:** Declares Nx project metadata and custom targets for a specific package. Each app and the shared lib has its own `project.json`.
+
+**Why it exists:** Nx's plugin inference (`@nx/vite/plugin`) automatically discovers `build`, `dev`, and `serve` targets from `vite.config.ts`. However, it does **not** auto-discover Jest-based test targets (Jest is not a Vite plugin). The `project.json` fills this gap by explicitly declaring a scoped `test` target for each project — this is what enables `nx affected --target=test` to know *which* project's tests to run and to cache per-project test results independently.
+
+**Example — `apps/customer-app/project.json`:**
+
+```jsonc
+{
+  "projectType": "application",
+  "targets": {
+    "test": {
+      "executor": "nx:run-commands",
+      "options": {
+        "command": "npx jest --testPathPattern=apps/customer-app --no-coverage --passWithNoTests"
+      },
+      "inputs": ["default", "^production", "{workspaceRoot}/jest.config.js"],
+      "cache": true   // Nx caches test results; re-runs only when inputs change
+    }
+  }
+}
+```
+
+The `inputs` array tells Nx exactly what files affect this test target. If none of those inputs change between runs, Nx restores the previous result from cache instantly — the test suite is not re-executed.
 
 ---
 
@@ -571,32 +640,53 @@ npm run dev:catalog     # Start product-catalog dev server → http://localhost:
 ### Production Build
 
 ```bash
-npm run build           # Build all three apps sequentially
-npm run build:customer  # Build customer-app → apps/customer-app/dist/
-npm run build:admin     # Build admin-dashboard → apps/admin-dashboard/dist/
-npm run build:catalog   # Build product-catalog → apps/product-catalog/dist/
+# All apps (via Nx — parallelised, cached)
+npm run build
+
+# Individual apps
+npm run build:customer  # → apps/customer-app/dist/
+npm run build:admin     # → apps/admin-dashboard/dist/
+npm run build:catalog   # → apps/product-catalog/dist/
+
+# Only apps affected by current changes (Nx affected)
+npm run build:affected
 ```
 
 ### Code Quality
 
 ```bash
-npm run lint            # ESLint across the entire monorepo
-npm run format          # Prettier format all files
-npm run type-check      # tsc --noEmit — full type check without emitting
+npm run lint              # ESLint across entire monorepo
+npm run lint:affected     # ESLint only on affected projects
+npm run lint:customer     # ESLint on customer-app only
+npm run format            # Prettier format all files
+npm run typecheck         # tsc --noEmit — full workspace type check
+npm run typecheck:affected # Typecheck only affected projects
 ```
 
 ### Testing
 
 ```bash
-npm test                # Run all 5 test suites (49 tests)
-npm run test:watch      # Jest watch mode
-npm run test:coverage   # Generate coverage report
+npm test                  # Run all 5 test suites (49 tests total)
+npm run test:watch        # Jest watch mode
+npm run test:coverage     # Generate coverage report
+npm run test:customer     # Run only customer-app tests
+npm run test:admin        # Run only admin-dashboard tests
+npm run test:catalog      # Run only product-catalog tests
+npm run test:affected     # Run tests only for affected projects (via Nx)
+```
+
+### Nx Task Graph
+
+```bash
+npm run graph             # Open interactive dependency graph in browser (nx graph)
+npx nx show projects      # List all projects Nx has discovered
+npx nx show project @react-microfrontend-workspace/customer-app  # Project targets detail
 ```
 
 ### Installation
 
 ```bash
-# Prerequisites: Node.js >= 18.x, npm >= 9.x
+# Prerequisites: Node.js >= 20.x, npm >= 9.x
 
 npm install             # Install all workspace dependencies (single node_modules at root)
 ```

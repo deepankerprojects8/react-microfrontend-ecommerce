@@ -1,0 +1,18 @@
+{
+  "$schema": "../../node_modules/nx/schemas/project-schema.json",
+  "projectType": "library",
+  "targets": {
+    "test": {
+      "executor": "nx:run-commands",
+      "options": {
+        "command": "npx jest --testPathPattern=libs/shared --no-coverage --passWithNoTests"
+      },
+      "inputs": [
+        "default",
+        "{workspaceRoot}/jest.config.js",
+        "{workspaceRoot}/test-setup.ts"
+      ],
+      "cache": true
+    }
+  }
+}

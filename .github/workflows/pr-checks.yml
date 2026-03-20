@@ -4,42 +4,54 @@ on:
   pull_request:
     branches: [main, develop]
 
+# Suppress Node.js 20 deprecation warnings from action runners
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+  NX_DAEMON: 'false'
+
 jobs:
-  typecheck:
+  pr-checks:
+    name: Lint / Typecheck / Test (affected only)
     runs-on: ubuntu-latest
 
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          # Full history required for nx-set-shas to determine the affected base
+          fetch-depth: 0
 
-      - name: Use Node.js
+      - name: Setup Node.js 24
         uses: actions/setup-node@v4
         with:
-          node-version: '18.x'
+          node-version: '24'
           cache: 'npm'
+
+      - name: Cache Nx computation cache
+        uses: actions/cache@v4
+        with:
+          path: .nx/cache
+          key: ${{ runner.os }}-nx-${{ hashFiles('package-lock.json') }}-${{ github.sha }}
+          restore-keys: |
+            ${{ runner.os }}-nx-${{ hashFiles('package-lock.json') }}-
+            ${{ runner.os }}-nx-
 
       - name: Install dependencies
         run: npm ci
 
-      - name: Type check
-        run: npx tsc --noEmit
+      # Derives NX_BASE (last successful CI commit) and NX_HEAD (current HEAD)
+      # so that nx affected knows exactly which projects changed.
+      - name: Derive Nx SHAs for affected detection
+        uses: nrwl/nx-set-shas@v4
 
-      - name: Lint check
-        run: npm run lint -- --max-warnings 0
+      - name: Show affected projects
+        run: npx nx show projects --affected --target=lint || true
 
-  test:
-    runs-on: ubuntu-latest
+      - name: Lint affected projects
+        run: npx nx affected --target=lint --parallel=3
 
-    steps:
-      - uses: actions/checkout@v4
+      - name: Typecheck affected projects
+        run: npx nx affected --target=typecheck --parallel=3
 
-      - name: Use Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: '18.x'
-          cache: 'npm'
-
-      - name: Install dependencies
-        run: npm ci
-
-      - name: Run tests
-        run: npm test 2>/dev/null || echo "No tests configured"
+      - name: Test affected projects
+        run: npx nx affected --target=test --parallel=3

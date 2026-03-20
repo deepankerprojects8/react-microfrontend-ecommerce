@@ -1,71 +1,162 @@
 name: Build and Deploy
 
+# Runs only on pushes to main — not on PRs (PR checks handled by pr-checks.yml)
 on:
   push:
-    branches: [main, develop]
-  pull_request:
-    branches: [main, develop]
+    branches: [main]
+
+# Suppress Node.js 20 deprecation warnings from action runners
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+  NX_DAEMON: 'false'
 
 jobs:
-  build:
+  # ─────────────────────────────────────────────────────────────────────────────
+  # JOB 1: Detect which apps are affected by this push.
+  # Outputs a JSON matrix consumed by the build and deploy jobs.
+  # If shared lib changes, ALL dependent apps are included automatically.
+  # ─────────────────────────────────────────────────────────────────────────────
+  detect-affected:
+    name: Detect Affected Apps
     runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        node-version: [18.x]
+    outputs:
+      apps: ${{ steps.set-matrix.outputs.apps }}
+      has-affected: ${{ steps.set-matrix.outputs.has-affected }}
 
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
-      - name: Use Node.js ${{ matrix.node-version }}
+      - name: Setup Node.js 24
         uses: actions/setup-node@v4
         with:
-          node-version: ${{ matrix.node-version }}
+          node-version: '24'
           cache: 'npm'
+
+      - name: Cache Nx computation cache
+        uses: actions/cache@v4
+        with:
+          path: .nx/cache
+          key: ${{ runner.os }}-nx-${{ hashFiles('package-lock.json') }}-${{ github.sha }}
+          restore-keys: |
+            ${{ runner.os }}-nx-${{ hashFiles('package-lock.json') }}-
+            ${{ runner.os }}-nx-
 
       - name: Install dependencies
         run: npm ci
 
-      - name: Lint code
-        run: npm run lint
+      - name: Derive Nx SHAs for affected detection
+        uses: nrwl/nx-set-shas@v4
 
-      - name: Build Customer App
-        run: npm run build:customer
+      - name: Build affected-app matrix
+        id: set-matrix
+        run: |
+          # Get all projects with an affected build target.
+          # Nx automatically cascades: if libs/shared changes, dependent apps appear here.
+          AFFECTED=$(npx nx show projects --affected --target=build 2>/dev/null || echo "")
+          echo "Affected projects: $AFFECTED"
 
-      - name: Build Admin Dashboard
-        run: npm run build:admin
+          APPS="[]"
+          if echo "$AFFECTED" | grep -q "customer-app"; then
+            APPS=$(echo "$APPS" | jq -c '. += [{"app":"customer-app","nx_project":"@react-microfrontend-workspace/customer-app","dist":"apps/customer-app/dist"}]')
+          fi
+          if echo "$AFFECTED" | grep -q "admin-dashboard"; then
+            APPS=$(echo "$APPS" | jq -c '. += [{"app":"admin-dashboard","nx_project":"@react-microfrontend-workspace/admin-dashboard","dist":"apps/admin-dashboard/dist"}]')
+          fi
+          if echo "$AFFECTED" | grep -q "product-catalog"; then
+            APPS=$(echo "$APPS" | jq -c '. += [{"app":"product-catalog","nx_project":"@react-microfrontend-workspace/product-catalog","dist":"apps/product-catalog/dist"}]')
+          fi
 
-      - name: Build Product Catalog
-        run: npm run build:catalog
+          HAS_AFFECTED="false"
+          if [ "$APPS" != "[]" ]; then
+            HAS_AFFECTED="true"
+          fi
 
-      - name: Store build artifacts
-        uses: actions/upload-artifact@v4
-        if: success()
-        with:
-          name: build-artifacts
-          path: |
-            apps/customer-app/dist
-            apps/admin-dashboard/dist
-            apps/product-catalog/dist
-          retention-days: 30
+          echo "apps=$APPS" >> $GITHUB_OUTPUT
+          echo "has-affected=$HAS_AFFECTED" >> $GITHUB_OUTPUT
+          echo "Final matrix: $APPS"
 
-  deploy:
-    needs: build
+  # ─────────────────────────────────────────────────────────────────────────────
+  # JOB 2: Build each affected app independently (parallel matrix).
+  # Uploades a separate artifact per app for independent deployment.
+  # ─────────────────────────────────────────────────────────────────────────────
+  build:
+    name: Build ${{ matrix.app }}
+    needs: detect-affected
+    if: needs.detect-affected.outputs.has-affected == 'true'
     runs-on: ubuntu-latest
-    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJson(needs.detect-affected.outputs.apps) }}
 
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout repository
+        uses: actions/checkout@v4
 
-      - name: Download artifacts
+      - name: Setup Node.js 24
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: 'npm'
+
+      - name: Restore Nx computation cache
+        uses: actions/cache@v4
+        with:
+          path: .nx/cache
+          key: ${{ runner.os }}-nx-${{ hashFiles('package-lock.json') }}-${{ github.sha }}
+          restore-keys: |
+            ${{ runner.os }}-nx-${{ hashFiles('package-lock.json') }}-
+            ${{ runner.os }}-nx-
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build ${{ matrix.app }}
+        run: npx nx build "${{ matrix.nx_project }}"
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist-${{ matrix.app }}
+          path: ${{ matrix.dist }}
+          if-no-files-found: error
+          retention-days: 7
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # JOB 3: Deploy each affected app independently (parallel matrix).
+  # Each app is deployed only if it was rebuilt in this run.
+  # Replace the echo commands with your real deploy CLI (e.g. Netlify CLI).
+  # ─────────────────────────────────────────────────────────────────────────────
+  deploy:
+    name: Deploy ${{ matrix.app }}
+    needs: [detect-affected, build]
+    if: needs.detect-affected.outputs.has-affected == 'true'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJson(needs.detect-affected.outputs.apps) }}
+
+    steps:
+      - name: Download build artifact for ${{ matrix.app }}
         uses: actions/download-artifact@v4
         with:
-          name: build-artifacts
+          name: dist-${{ matrix.app }}
+          path: dist
 
-      - name: Deploy Customer App
-        run: echo "Deploying customer-app to production..."
-
-      - name: Deploy Admin Dashboard
-        run: echo "Deploying admin-dashboard to production..."
-
-      - name: Deploy Product Catalog
-        run: echo "Deploying product-catalog to production..."
+      - name: Deploy ${{ matrix.app }}
+        run: |
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          echo "  Deploying: ${{ matrix.app }}"
+          echo "  Artifact:  dist/"
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          echo "[simulate] Deploying to Netlify..."
+          # Uncomment and configure for real Netlify deploys:
+          # npx netlify-cli deploy --prod \
+          #   --dir=dist \
+          #   --site=${{ secrets[format('NETLIFY_SITE_ID_{0}', matrix.app)] }} \
+          #   --auth=${{ secrets.NETLIFY_AUTH_TOKEN }}
+          echo "[simulate] Deploy complete for ${{ matrix.app }}"

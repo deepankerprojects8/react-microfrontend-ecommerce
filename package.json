@@ -7,18 +7,33 @@
     "dev:customer": "npm run dev -w apps/customer-app",
     "dev:admin": "npm run dev -w apps/admin-dashboard",
     "dev:catalog": "npm run dev -w apps/product-catalog",
-    "dev:products": "npm run dev -w apps/product-catalog",
+
+    "build": "nx run-many --target=build --all",
     "build:customer": "npm run build -w apps/customer-app",
     "build:admin": "npm run build -w apps/admin-dashboard",
     "build:catalog": "npm run build -w apps/product-catalog",
-    "build:products": "npm run build -w apps/product-catalog",
-    "build": "npm run build:customer && npm run build:admin && npm run build:catalog",
+    "build:affected": "nx affected --target=build",
+
     "lint": "eslint . --ext .ts,.tsx,.js,.jsx",
-    "format": "prettier --write .",
-    "type-check": "tsc --noEmit",
+    "lint:customer": "eslint apps/customer-app/src --ext .ts,.tsx",
+    "lint:admin": "eslint apps/admin-dashboard/src --ext .ts,.tsx",
+    "lint:catalog": "eslint apps/product-catalog/src --ext .ts,.tsx",
+    "lint:all": "nx run-many --target=lint --all",
+    "lint:affected": "nx affected --target=lint",
+
     "test": "jest",
     "test:watch": "jest --watch",
-    "test:coverage": "jest --coverage"
+    "test:coverage": "jest --coverage",
+    "test:customer": "jest --testPathPattern=apps/customer-app --no-coverage",
+    "test:admin": "jest --testPathPattern=apps/admin-dashboard --no-coverage",
+    "test:catalog": "jest --testPathPattern=apps/product-catalog --no-coverage",
+    "test:affected": "nx affected --target=test",
+
+    "typecheck": "tsc --noEmit",
+    "typecheck:affected": "nx affected --target=typecheck",
+
+    "format": "prettier --write .",
+    "graph": "nx graph"
   },
   "private": true,
   "dependencies": {

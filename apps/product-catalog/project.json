@@ -1,0 +1,19 @@
+{
+  "$schema": "../../node_modules/nx/schemas/project-schema.json",
+  "projectType": "application",
+  "targets": {
+    "test": {
+      "executor": "nx:run-commands",
+      "options": {
+        "command": "npx jest --testPathPattern=apps/product-catalog --no-coverage --passWithNoTests"
+      },
+      "inputs": [
+        "default",
+        "^production",
+        "{workspaceRoot}/jest.config.js",
+        "{workspaceRoot}/test-setup.ts"
+      ],
+      "cache": true
+    }
+  }
+}

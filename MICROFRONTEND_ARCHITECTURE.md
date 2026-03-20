@@ -402,17 +402,29 @@ federation({
 
 Each app is independently deployable because each app's `dist/` folder is a complete, standalone static site. No app's runtime depends on another app's files being present.
 
-**Independent deployment model:**
+**Independent deployment model driven by Nx affected:**
 
 ```
-CI/CD Pipeline (per app or per monorepo — see CI_CD_AND_PRECOMMIT.md)
+CI/CD Pipeline (build-deploy.yml — push to main only)
         │
-        ├─► Build customer-app/dist  → Deploy to cdn.example.com/customer/
+        ├── detect-affected job
+        │       └─ nx show projects --affected --target=build
+        │           └─ Outputs JSON matrix of apps that actually changed
         │
-        ├─► Build admin-dashboard/dist → Deploy to admin.example.com/
+        ├── build job (matrix — parallel per affected app)
+        │       ├─ Build customer-app/dist  → upload as dist-customer-app artifact
+        │       ├─ Build admin-dashboard/dist → upload as dist-admin-dashboard artifact
+        │       └─ Build product-catalog/dist → upload as dist-product-catalog artifact
         │
-        └─► Build product-catalog/dist → Deploy to cdn.example.com/catalog/
+        └── deploy job (matrix — parallel per affected app)
+                ├─ Deploy customer-app    → cdn.example.com/customer/
+                ├─ Deploy admin-dashboard → admin.example.com/
+                └─ Deploy product-catalog → cdn.example.com/catalog/
 ```
+
+Key behaviour: if only `admin-dashboard` changed, only `admin-dashboard` appears in the matrix. `customer-app` and `product-catalog` are not built, not deployed, and continue serving their last deployed version.
+
+If `libs/shared` changed, Nx automatically promotes all three apps into the affected set (because they all depend on it), and all three are rebuilt and redeployed.
 
 **Three deployment topology options:**
 
@@ -504,11 +516,17 @@ Apps mock the shared library's hooks and components to test their own logic in i
 ## Future Evolution Roadmap
 
 ```
-Phase 1 (Current)
+Phase 1 (Current ✔)
 ├── NPM Workspaces monorepo
-├── Three independent Vite apps
-├── Shared library via build-time import
-└── Independent deployment of dist/ folders
+├── Nx 22.6.1 installed with @nx/react, @nx/vite, @nx/eslint, @nx/eslint-plugin
+├── Three independent Vite 7 apps
+├── Shared library via build-time import (npm workspace)
+├── Nx affected detection for CI — only changed apps are built/deployed
+├── Per-project jest test targets registered in project.json
+├── Nx computation cache for build, lint, test, typecheck targets
+├── Independent per-app deployment via GitHub Actions matrix strategy
+├── Node.js 24 in CI (GitHub Actions)
+└── Independent deployment of dist/ folders per app
 
 Phase 2 (Near-term)
 ├── Add real backend API (replace mock data in ProductContext)

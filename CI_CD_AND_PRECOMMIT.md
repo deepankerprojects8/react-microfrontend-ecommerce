@@ -276,104 +276,123 @@ Two GitHub Actions workflows handle all CI/CD automation.
 
 **Trigger:** Every pull request targeting `main` or `develop`.
 
-**Purpose:** Enforce quality gates before any code lands on an integration branch. This workflow is a mandatory status check — PRs cannot be merged unless it passes.
+**Purpose:** Run quality checks only on the projects actually affected by the PR changes. Library changes automatically cascade to dependent apps. This workflow is a mandatory status check — PRs cannot be merged unless it passes.
+
+**Key features:**
+- **`nrwl/nx-set-shas@v4`** — Derives `NX_BASE` (last successful CI SHA) and `NX_HEAD` (current HEAD). Nx uses these to compute exactly which projects changed.
+- **`FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true`** — Suppresses the GitHub Actions Node.js 20 deprecation warning. All action runners use Node.js 24.
+- **Nx computation cache** — The `.nx/cache` directory is restored/saved via `actions/cache@v4`, keyed on `package-lock.json` hash + commit SHA.
+- **Single job** — Lint, typecheck, and test all run in one job sequentially with `--parallel=3` within each Nx command.
 
 ```
 on:
   pull_request:
     branches: [main, develop]
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+  NX_DAEMON: 'false'
+
+jobs:
+  pr-checks:
+    runs-on: ubuntu-latest
+
+    steps:
+      1. actions/checkout@v4 (fetch-depth: 0 — full history for SHA comparison)
+      2. actions/setup-node@v4 (Node.js 24, npm cache)
+      3. actions/cache@v4 (.nx/cache — restore Nx computation cache)
+      4. npm ci
+      5. nrwl/nx-set-shas@v4 ← Sets NX_BASE and NX_HEAD env vars
+      6. Log: npx nx show projects --affected --target=lint
+      7. npx nx affected --target=lint --parallel=3
+      8. npx nx affected --target=typecheck --parallel=3
+      9. npx nx affected --target=test --parallel=3
 ```
 
-**Jobs:**
-
+**Effect on a PR that only touches `admin-dashboard`:**
 ```
-┌─────────────────────────────────────────────────────────────────┐
-│ Job: typecheck                                                  │
-│ Runner: ubuntu-latest, Node 18.x                               │
-│                                                                 │
-│  1. actions/checkout@v4          ← Checkout PR branch          │
-│  2. actions/setup-node@v4        ← Install Node 18 + npm cache │
-│  3. npm ci                       ← Clean install from lockfile  │
-│  4. npx tsc --noEmit             ← Full workspace type check    │
-│  5. npm run lint -- --max-warnings 0  ← Lint, zero tolerance   │
-└─────────────────────────────────────────────────────────────────┘
+nx affected --target=lint    → runs lint on admin-dashboard only
+nx affected --target=typecheck → runs typecheck on admin-dashboard only
+nx affected --target=test    → runs tests for admin-dashboard only
 
-┌─────────────────────────────────────────────────────────────────┐
-│ Job: test                                                       │
-│ Runner: ubuntu-latest, Node 18.x                               │
-│                                                                 │
-│  1. actions/checkout@v4                                         │
-│  2. actions/setup-node@v4                                       │
-│  3. npm ci                                                      │
-│  4. npm test                     ← Run all 5 test suites       │
-└─────────────────────────────────────────────────────────────────┘
+Customer-app and product-catalog: skipped entirely
 ```
 
-**Why two separate jobs:** `typecheck` and `test` run in parallel on GitHub's runners, reducing total PR feedback time. A type error does not block test results from reporting.
-
-**`--max-warnings 0`:** The lint step treats any ESLint warning as an error in CI. This enforces a clean codebase — lint warnings are not deferred to later.
+**Effect on a PR that touches `libs/shared`:**
+```
+nx affected → all three apps + shared are affected (dependency graph cascade)
+All four projects: lint + typecheck + test
+```
 
 ---
 
 ### Workflow 2 — Build and Deploy (`build-deploy.yml`)
 
-**Triggers:**
-- `push` to `main` — Runs build **and** deploy jobs
-- `push` to `develop` — Runs build job only
-- `pull_request` to `main` or `develop` — Runs build job (validates the build can succeed)
+**Trigger:** Push to `main` **only**. PR checks are already handled by `pr-checks.yml` — there is no duplication.
+
+**Purpose:** Detect which apps were affected by the push, build only those apps independently in parallel, and deploy each independently.
+
+**Key design: Three-job pipeline with matrix strategy**
 
 ```
 on:
   push:
-    branches: [main, develop]
-  pull_request:
-    branches: [main, develop]
+    branches: [main]  # ONLY main — not develop, not PRs
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+  NX_DAEMON: 'false'
+
+jobs:
+
+  ┌───────────────────────────────────────────────────────────────┐
+  │ Job 1: detect-affected                                        │
+  │ Outputs: apps (JSON array), has-affected (bool)               │
+  │                                                               │
+  │  1. checkout (fetch-depth: 0)                                 │
+  │  2. setup-node (Node 24 + npm cache)                          │
+  │  3. restore .nx/cache                                         │
+  │  4. npm ci                                                    │
+  │  5. nrwl/nx-set-shas@v4 (derives NX_BASE, NX_HEAD)           │
+  │  6. npx nx show projects --affected --target=build            │
+  │  7. Shell script: build JSON matrix of affected apps          │
+  │     e.g. [{"app":"customer-app","dist":"apps/customer-app/dist"}, ...]  │
+  │  8. Output: apps=$APPS  has-affected=true/false               │
+  └──────────────────────┬─────────────────────────────────────────┘
+                         │ if has-affected == true
+                         │ matrix = fromJson(apps)
+           ┌────────────┴─────────────┐
+           │                           │
+  ┌───────┴─────────────┐  ┌───────┴─────────────┐
+  │ Job 2: build (matrix) │  │ (waits for build) │
+  │ One runner per app    │  └──────────────────┘
+  │                       │           │
+  │  1. checkout          │  ┌───────┴─────────────┐
+  │  2. setup-node        │  │ Job 3: deploy (matrix)│
+  │  3. restore .nx/cache │  │ One runner per app    │
+  │  4. npm ci            │  │                       │
+  │  5. npx nx build $app │  │  1. Download artifact  │
+  │  6. Upload artifact   │  │     dist-$app          │
+  │  dist-$app            │  │  2. Deploy $app        │
+  └─────────────────────┘  └─────────────────────┘
 ```
 
-**Jobs:**
-
-```
-┌─────────────────────────────────────────────────────────────────┐
-│ Job: build                                                      │
-│ Runner: ubuntu-latest, Node 18.x                               │
-│                                                                 │
-│  1. actions/checkout@v4                                         │
-│  2. actions/setup-node@v4          ← Uses npm cache for speed  │
-│  3. npm ci                         ← Reproducible install      │
-│  4. npm run lint                   ← Lint check                │
-│  5. npm run build:customer         ← Build customer-app/dist   │
-│  6. npm run build:admin            ← Build admin-dashboard/dist│
-│  7. npm run build:catalog          ← Build product-catalog/dist│
-│  8. actions/upload-artifact@v4     ← Store all 3 dist folders  │
-│     (retained for 30 days)         ← Available to deploy job   │
-└─────────────────────────────────────────────────────────────────┘
-                    │
-                    │  needs: build
-                    │  only on: push to main
-                    ▼
-┌─────────────────────────────────────────────────────────────────┐
-│ Job: deploy                                                     │
-│ Condition: github.ref == 'refs/heads/main'                     │
-│            && github.event_name == 'push'                      │
-│                                                                 │
-│  1. actions/checkout@v4                                         │
-│  2. actions/download-artifact@v4   ← Retrieve built artifacts  │
-│  3. Deploy customer-app            ← (CDN/hosting deployment)  │
-│  4. Deploy admin-dashboard         ← (CDN/hosting deployment)  │
-│  5. Deploy product-catalog         ← (CDN/hosting deployment)  │
-└─────────────────────────────────────────────────────────────────┘
-```
+**Critical design decisions:**
+- `fail-fast: false` on both matrix jobs — if `admin-dashboard` build fails, `customer-app` still deploys
+- Each app uploads its **own separate artifact** (`dist-customer-app`, `dist-admin-dashboard`, etc.) — not a single combined archive
+- The deploy job downloads only **its own app's artifact** — true independent deployment
+- Apps not in the matrix are never touched
 
 ### When Each Workflow Runs
 
-| Event | PR Checks | Build Job | Deploy Job |
+| Event | PR Checks (affected) | Build (affected matrix) | Deploy (affected matrix) |
 |---|---|---|---|
-| PR opened (feature → develop) | ✅ | ✅ (build validation) | ❌ |
-| New commit pushed to open PR | ✅ | ✅ | ❌ |
-| PR merged to `develop` | ❌ | ✅ | ❌ |
-| PR opened (develop → main) | ✅ | ✅ | ❌ |
-| PR merged to `main` | ❌ | ✅ | ✅ |
-| Direct push to `main` | ❌ (no PR) | ✅ | ✅ |
+| PR opened (feature → develop) | ✅ | ❌ | ❌ |
+| New commit pushed to open PR | ✅ | ❌ | ❌ |
+| PR merged to `develop` | ❌ | ❌ | ❌ |
+| PR opened (develop → main) | ✅ | ❌ | ❌ |
+| PR merged to `main` | ❌ | ✅ affected only | ✅ affected only |
+| Direct push to `main` | ❌ | ✅ affected only | ✅ affected only |
 
 ### `npm ci` vs `npm install`
 
@@ -384,16 +403,41 @@ All CI workflows use `npm ci` (not `npm install`):
 - Deletes `node_modules` before installing — completely reproducible
 - Faster in CI because it skips dependency resolution
 
-### npm Cache in CI
+### Node.js Version
+
+All CI workflows use **Node.js 24** via `actions/setup-node@v4`:
 
 ```yaml
 uses: actions/setup-node@v4
 with:
-  node-version: '18.x'
+  node-version: '24'
   cache: 'npm'
 ```
 
-GitHub Actions caches the npm package cache keyed on `package-lock.json` hash. When the lockfile has not changed, `npm ci` restores cached packages instead of downloading from the registry. This significantly reduces CI run time.
+The workspace-level env var `FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true` suppresses the GitHub Actions runner deprecation warning that appears when third-party actions internally reference older Node.js runtime versions.
+
+### npm Cache and Nx Cache in CI
+
+```yaml
+# npm package cache (keyed on package-lock.json)
+uses: actions/setup-node@v4
+with:
+  node-version: '24'
+  cache: 'npm'
+
+# Nx computation cache (keyed on package-lock.json hash + commit SHA)
+uses: actions/cache@v4
+with:
+  path: .nx/cache
+  key: ${{ runner.os }}-nx-${{ hashFiles('package-lock.json') }}-${{ github.sha }}
+  restore-keys: |
+    ${{ runner.os }}-nx-${{ hashFiles('package-lock.json') }}-
+    ${{ runner.os }}-nx-
+```
+
+**npm cache:** GitHub Actions caches the npm package registry download cache keyed on the `package-lock.json` hash. When the lockfile has not changed, `npm ci` restores from cache instead of downloading all packages.
+
+**Nx computation cache:** Nx stores task output hashes in `.nx/cache`. Between CI runs on the same lockfile, previously computed build/lint/test results are restored. A project whose inputs have not changed since the last push will have its test/lint results served from cache — the command is not re-executed.
 
 <!-- FUTURE: SonarQube / SonarCloud integration can be added here as a step in pr-checks.yml
      to report code coverage, duplications, and code smell metrics.
@@ -446,20 +490,27 @@ For each of the three apps:
 
 ### Build Artifact Storage
 
-The `build-deploy.yml` workflow uploads all three `dist/` folders as a single artifact named `build-artifacts`:
+Each app in the affected matrix uploads its own **separate artifact**, not a single combined archive. This is fundamental to independent deployment:
 
 ```yaml
+# In the build matrix job (runs once per affected app)
 - uses: actions/upload-artifact@v4
   with:
-    name: build-artifacts
-    path: |
-      apps/customer-app/dist
-      apps/admin-dashboard/dist
-      apps/product-catalog/dist
-    retention-days: 30
+    name: dist-${{ matrix.app }}    # e.g. dist-customer-app, dist-admin-dashboard
+    path: ${{ matrix.dist }}        # e.g. apps/customer-app/dist
+    if-no-files-found: error
+    retention-days: 7
+
+# In the deploy matrix job (runs once per affected app)
+- uses: actions/download-artifact@v4
+  with:
+    name: dist-${{ matrix.app }}    # Downloads only this app's artifact
+    path: dist
 ```
 
-Artifacts are retained for 30 days, enabling rollback to any previous build by downloading a prior artifact.
+**Why separate artifacts matter:** The deploy job for `customer-app` downloads `dist-customer-app` and deploys it. It never sees `admin-dashboard`'s files. If `admin-dashboard`'s build failed, `customer-app` is still deployed successfully (`fail-fast: false`).
+
+Artifacts are retained for 7 days. For rollback, download a prior run's artifact and re-deploy manually.
 
 ---
 
@@ -486,49 +537,40 @@ An update to `admin-dashboard` deploys **only** the admin dist folder. The custo
 ```
 feat/search-filter branch
     → PR created
-    → pr-checks.yml validates: type check + lint + tests
-    → build-deploy.yml builds all apps
+    → pr-checks.yml: lint + typecheck + test on affected projects only
     → Optionally: deploy to a preview/staging URL for review
-    → PR approved and merged
+    → PR approved and merged to main
+    → build-deploy.yml triggers: builds and deploys only affected apps
 ```
 
-Review apps (ephemeral per-PR deployments) are not configured in the current workflows but can be added with hosting platforms like Vercel, Netlify, or AWS Amplify.
+Review apps (ephemeral per-PR deployments) are not configured in the current workflows but can be added with Netlify, Vercel, or AWS Amplify.
 
-#### Model 2: Staging Deploy (On Merge to `develop`)
+#### Model 2: Production Deploy (On Merge to `main`)
 
-```
-feature branch → develop
-    → build-deploy.yml runs build job
-    → All three apps are built and artifacts uploaded
-    → Deploy job does NOT run (only main triggers deploy)
-    ← Can be extended to deploy to a staging environment
-```
-
-#### Model 3: Production Deploy (On Merge to `main`)
+This is the current active model:
 
 ```
-develop → main (via PR)
-    → pr-checks.yml must pass on the PR
-    → On merge: build-deploy.yml runs both jobs
-    → Build job: builds all 3 apps, uploads artifacts
-    → Deploy job (needs: build): downloads artifacts, deploys each app
+feature branch → main (via PR)
+    → pr-checks.yml must pass on the PR (affected projects only)
+    → On merge: build-deploy.yml triggers
+        → detect-affected: builds JSON matrix of changed apps
+        → build matrix: builds only affected apps (parallel runners)
+        → deploy matrix: deploys only affected apps (parallel runners)
+        → Unaffected apps: not touched, continue serving current version
 ```
 
 ### Deploying Apps Individually
 
-The build scripts allow building individual apps, enabling targeted deployments:
+The `build:affected` script and the CI matrix mean only changed apps are ever built or deployed. For manual targeted deployments:
 
 ```bash
-# Deploy only the admin dashboard (e.g., hotfix to admin without touching customer app)
+# Build and deploy only the admin dashboard (e.g., hotfix)
 npm run build:admin
 # → upload apps/admin-dashboard/dist/ to your CDN only
-```
 
-In CI, this can be implemented with Nx affected commands (future enhancement):
-
-```bash
-# Only build apps affected by changes in the PR
-npx nx affected --target=build
+# See which projects would be affected from current changes
+npm run build:affected  # nx affected --target=build
+npm run test:affected   # nx affected --target=test
 ```
 
 ### Deployment Infrastructure Options
